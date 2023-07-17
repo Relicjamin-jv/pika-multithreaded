@@ -115,6 +115,7 @@ class ExampleMultithreadedConsumer:
                 self.receive_message,
                 auto_ack=False,
                 declare_queue=True)
+            print(f"{'*'*20}\nDone Consuming\n{'*'*20}")
 
     def receive_message(self, amqp_client, _, method, properties, body):
         logger.debug("****** Message Received! ******")
@@ -163,7 +164,7 @@ class ExampleMultithreadedConsumer:
                     delivery_tag=method.delivery_tag, requeue=False)
 
 
-if "__name__" == "__main__":
+if __name__ == "__main__":
     example_obj = ExampleMultithreadedConsumer(
         debug=True,
         dry_run=False
