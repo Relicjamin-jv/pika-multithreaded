@@ -103,7 +103,7 @@ class AmqpClient:
                     break
             # Add some backoff seconds if we're supposed to retry the connection
             self.logger.debug("Waiting 10 seconds before retrying the connection:")
-            time.sleep(1)
+            time.sleep(10)
             connection_attempt += 1
             self.logger.debug(
                 f"Attempting to connect again (attempt #{connection_attempt})...")
@@ -295,8 +295,9 @@ class AmqpClient:
 
 
 class AmqpClientAsync:
-    """This is an example consumer that will handle unexpected interactions
-    with RabbitMQ such as channel and connection closures.
+    """
+    This is consumer that will handle unexpected interactions with RabbitMQ
+    such as channel and connection closures.
 
     If RabbitMQ closes the connection, this class will stop and indicate
     that reconnection is necessary. You should look at the output, as
@@ -307,30 +308,38 @@ class AmqpClientAsync:
     commands that were issued and that should surface in the output as well.
 
     """
-    EXCHANGE = 'message'
-    QUEUE = 'test'
-    ROUTING_KEY = 'example.test'
+    # EXCHANGE = 'message'
+    # QUEUE = 'test'
+    # ROUTING_KEY = 'example.test'
 
-    def __init__(self, amqp_url):
+    # def __init__(self, amqp_url):
+    def __init__(self, host=None, port=None, user=None, password=None, use_ssl=False, url=None):
         """Create a new instance of the consumer class, passing in the AMQP
         URL used to connect to RabbitMQ.
 
         :param str amqp_url: The AMQP url to connect with
 
         """
+        if url:
+            self._url = url
+        else:
+            self._url = AmqpUtils.generate_url(
+                host, port, user, password, use_ssl)
         self.should_reconnect = False
         self.was_consuming = False
 
         self._connection = None
         self._channel = None
         self._closing = False
-        self._consumer_tag = None
-        self._url = amqp_url
+        self._connection_failed_backoff_seconds = 1
+        # self._consumer_tag = None
         self._consuming = False
-        # In production, experiment with higher prefetch values
-        # for higher consumer throughput
-        self._prefetch_count = 1
+        # # In production, experiment with higher prefetch values
+        # # for higher consumer throughput
+        # self._prefetch_count = 1
         self.logger = logging.getLogger(__name__)
+        self._connection_attempts = 0
+        self._reconnect_delay = 0
 
     def connect(self):
         """This method connects to RabbitMQ, returning the connection handle.
@@ -340,7 +349,8 @@ class AmqpClientAsync:
         :rtype: pika.SelectConnection
 
         """
-        LOGGER.info('Connecting to %s', self._url)
+        print(f"Connecting to '{self._url}'")
+        self._connection_attempts += 1
         return pika.SelectConnection(
             parameters=pika.URLParameters(self._url),
             on_open_callback=self.on_connection_open,
@@ -350,9 +360,9 @@ class AmqpClientAsync:
     def close_connection(self):
         self._consuming = False
         if self._connection.is_closing or self._connection.is_closed:
-            LOGGER.info('Connection is closing or already closed')
+            print('Connection is closing or already closed')
         else:
-            LOGGER.info('Closing connection')
+            print('Closing connection')
             self._connection.close()
 
     def on_connection_open(self, _unused_connection):
@@ -363,7 +373,8 @@ class AmqpClientAsync:
         :param pika.SelectConnection _unused_connection: The connection
 
         """
-        LOGGER.info('Connection opened')
+        print('Connection opened')
+        self._connection_attempts = 0
         self.open_channel()
 
     def on_connection_open_error(self, _unused_connection, err):
@@ -374,8 +385,21 @@ class AmqpClientAsync:
         :param Exception err: The error
 
         """
-        LOGGER.error('Connection open failed: %s', err)
+        self.logger.error(f"Connection open failed: {err}")
+        time.sleep(self._connection_failed_backoff_seconds)
         self.reconnect()
+        # new_thread = threading.Thread(
+        #     target=self._thread_reconnector,
+        #     args=[threading.current_thread()],
+        #     daemon=False
+        # )
+        # new_thread.start()
+
+    # def _thread_reconnector(self, execution_thread: threading.Thread):
+    #     time.sleep(self._connection_failed_backoff_seconds)
+    #     self._connection.add_callback_threadsafe(
+    #         functools.partial(self.reconnect)
+    #     )
 
     def on_connection_closed(self, _unused_connection, reason):
         """This method is invoked by pika when the connection to RabbitMQ is
@@ -391,8 +415,7 @@ class AmqpClientAsync:
         if self._closing:
             self._connection.ioloop.stop()
         else:
-            LOGGER.warning(
-                'Connection closed, reconnect necessary: %s', reason)
+            self.logger.warning(f"Connection closed, reconnect necessary: {reason}")
             self.reconnect()
 
     def reconnect(self):
@@ -410,7 +433,7 @@ class AmqpClientAsync:
         on_channel_open callback will be invoked by pika.
 
         """
-        LOGGER.info('Creating a new channel')
+        print('Creating a new channel')
         self._connection.channel(on_open_callback=self.on_channel_open)
 
     def on_channel_open(self, channel):
@@ -422,17 +445,18 @@ class AmqpClientAsync:
         :param pika.channel.Channel channel: The channel object
 
         """
-        LOGGER.info('Channel opened')
+        print('Channel opened')
         self._channel = channel
         self.add_on_channel_close_callback()
-        self.setup_exchange(self.EXCHANGE)
+        self.set_qos()
+        # self.setup_exchange(self.EXCHANGE)
 
     def add_on_channel_close_callback(self):
         """This method tells pika to call the on_channel_closed method if
         RabbitMQ unexpectedly closes the channel.
 
         """
-        LOGGER.info('Adding channel close callback')
+        print('Adding channel close callback')
         self._channel.add_on_close_callback(self.on_channel_closed)
 
     def on_channel_closed(self, channel, reason):
@@ -446,37 +470,37 @@ class AmqpClientAsync:
         :param Exception reason: why the channel was closed
 
         """
-        LOGGER.warning('Channel %i was closed: %s', channel, reason)
+        self.logger.warning(f"Channel {channel} was closed: {reason}")
         self.close_connection()
 
-    def setup_exchange(self, exchange_name):
-        """Setup the exchange on RabbitMQ by invoking the Exchange.Declare RPC
-        command. When it is complete, the on_exchange_declareok method will
-        be invoked by pika.
+    # def setup_exchange(self, exchange_name):
+    #     """Setup the exchange on RabbitMQ by invoking the Exchange.Declare RPC
+    #     command. When it is complete, the on_exchange_declareok method will
+    #     be invoked by pika.
 
-        :param str|unicode exchange_name: The name of the exchange to declare
+    #     :param str|unicode exchange_name: The name of the exchange to declare
 
-        """
-        LOGGER.info('Declaring exchange: %s', exchange_name)
-        # Note: using functools.partial is not required, it is demonstrating
-        # how arbitrary data can be passed to the callback when it is called
-        cb = functools.partial(
-            self.on_exchange_declareok, userdata=exchange_name)
-        self._channel.exchange_declare(
-            exchange=exchange_name,
-            exchange_type=self.EXCHANGE_TYPE,
-            callback=cb)
+    #     """
+    #     print(f"Declaring exchange: {exchange_name}")
+    #     # Note: using functools.partial is not required, it is demonstrating
+    #     # how arbitrary data can be passed to the callback when it is called
+    #     cb = functools.partial(
+    #         self.on_exchange_declareok, userdata=exchange_name)
+    #     self._channel.exchange_declare(
+    #         exchange=exchange_name,
+    #         exchange_type=self.EXCHANGE_TYPE,
+    #         callback=cb)
 
-    def on_exchange_declareok(self, _unused_frame, userdata):
-        """Invoked by pika when RabbitMQ has finished the Exchange.Declare RPC
-        command.
+    # def on_exchange_declareok(self, _unused_frame, userdata):
+    #     """Invoked by pika when RabbitMQ has finished the Exchange.Declare RPC
+    #     command.
 
-        :param pika.Frame.Method unused_frame: Exchange.DeclareOk response frame
-        :param str|unicode userdata: Extra user data (exchange name)
+    #     :param pika.Frame.Method unused_frame: Exchange.DeclareOk response frame
+    #     :param str|unicode userdata: Extra user data (exchange name)
 
-        """
-        LOGGER.info('Exchange declared: %s', userdata)
-        self.setup_queue(self.QUEUE)
+    #     """
+    #     print(f"Exchange declared: {userdata}")
+    #     self.setup_queue(self._queue)
 
     def setup_queue(self, queue_name):
         """Setup the queue on RabbitMQ by invoking the Queue.Declare RPC
@@ -486,9 +510,10 @@ class AmqpClientAsync:
         :param str|unicode queue_name: The name of the queue to declare.
 
         """
-        LOGGER.info('Declaring queue %s', queue_name)
-        cb = functools.partial(self.on_queue_declareok, userdata=queue_name)
-        self._channel.queue_declare(queue=queue_name, callback=cb)
+        if self._declare_queue:
+            print(f"Declaring queue {queue_name}")
+            cb = functools.partial(self.on_queue_declareok, userdata=queue_name)
+            self._channel.queue_declare(queue=queue_name, durable=True, callback=cb)
 
     def on_queue_declareok(self, _unused_frame, userdata):
         """Method invoked by pika when the Queue.Declare RPC call made in
@@ -502,25 +527,24 @@ class AmqpClientAsync:
 
         """
         queue_name = userdata
-        LOGGER.info('Binding %s to %s with %s', self.EXCHANGE, queue_name,
-                    self.ROUTING_KEY)
-        cb = functools.partial(self.on_bindok, userdata=queue_name)
-        self._channel.queue_bind(
-            queue_name,
-            self.EXCHANGE,
-            routing_key=self.ROUTING_KEY,
-            callback=cb)
+        print(f'Queue {queue_name} declared')
+        # cb = functools.partial(self.on_bindok, userdata=queue_name)
+        # self._channel.queue_bind(
+        #     queue_name,
+        #     self.EXCHANGE,
+        #     routing_key=self.ROUTING_KEY,
+        #     callback=cb)
 
-    def on_bindok(self, _unused_frame, userdata):
-        """Invoked by pika when the Queue.Bind method has completed. At this
-        point we will set the prefetch count for the channel.
+    # def on_bindok(self, _unused_frame, userdata):
+    #     """Invoked by pika when the Queue.Bind method has completed. At this
+    #     point we will set the prefetch count for the channel.
 
-        :param pika.frame.Method _unused_frame: The Queue.BindOk response frame
-        :param str|unicode userdata: Extra user data (queue name)
+    #     :param pika.frame.Method _unused_frame: The Queue.BindOk response frame
+    #     :param str|unicode userdata: Extra user data (queue name)
 
-        """
-        LOGGER.info('Queue bound: %s', userdata)
-        self.set_qos()
+    #     """
+    #     print("Queue bound: {userdata}")
+    #     self.set_qos()
 
     def set_qos(self):
         """This method sets up the consumer prefetch to only be delivered
@@ -540,7 +564,7 @@ class AmqpClientAsync:
         :param pika.frame.Method _unused_frame: The Basic.QosOk response frame
 
         """
-        LOGGER.info('QOS set to: %d', self._prefetch_count)
+        print('QOS set to: %d', self._prefetch_count)
         self.start_consuming()
 
     def start_consuming(self):
@@ -553,10 +577,13 @@ class AmqpClientAsync:
         will invoke when a message is fully received.
 
         """
-        LOGGER.info('Issuing consumer related RPC commands')
+        print('Issuing consumer related RPC commands')
         self.add_on_cancel_callback()
-        self._consumer_tag = self._channel.basic_consume(
-            self.QUEUE, self.on_message)
+        self._channel.basic_consume(
+            self._queue,
+            self.on_message,
+            auto_ack=self._auto_ack,
+            consumer_tag=self._consumer_tag)
         self.was_consuming = True
         self._consuming = True
 
@@ -566,7 +593,7 @@ class AmqpClientAsync:
         on_consumer_cancelled will be invoked by pika.
 
         """
-        LOGGER.info('Adding consumer cancellation callback')
+        print('Adding consumer cancellation callback')
         self._channel.add_on_cancel_callback(self.on_consumer_cancelled)
 
     def on_consumer_cancelled(self, method_frame):
@@ -576,12 +603,11 @@ class AmqpClientAsync:
         :param pika.frame.Method method_frame: The Basic.Cancel frame
 
         """
-        LOGGER.info('Consumer was cancelled remotely, shutting down: %r',
-                    method_frame)
+        print('Consumer was cancelled remotely, shutting down: %r', method_frame)
         if self._channel:
             self._channel.close()
 
-    def on_message(self, _unused_channel, basic_deliver, properties, body):
+    def on_message(self, _unused_channel, method, properties, body):
         """Invoked by pika when a message is delivered from RabbitMQ. The
         channel is passed for your convenience. The basic_deliver object that
         is passed in carries the exchange, routing key, delivery tag and
@@ -595,9 +621,14 @@ class AmqpClientAsync:
         :param bytes body: The message body
 
         """
-        LOGGER.info('Received message # %s from %s: %s',
-                    basic_deliver.delivery_tag, properties.app_id, body)
-        self.acknowledge_message(basic_deliver.delivery_tag)
+        print(f"{'*'*15}")
+        print("RECEIVED MESSAGE")
+        print(f"{'*'*15}")
+        print(f"Method: '{method}'")
+        print(f"Properties: '{properties}'")
+        print(f"Body: '{body}'")
+        if not self._auto_ack:
+            self.acknowledge_message(method.delivery_tag)
 
     def acknowledge_message(self, delivery_tag):
         """Acknowledge the message delivery from RabbitMQ by sending a
@@ -606,7 +637,7 @@ class AmqpClientAsync:
         :param int delivery_tag: The delivery tag from the Basic.Deliver frame
 
         """
-        LOGGER.info('Acknowledging message %s', delivery_tag)
+        print(f"Acknowledging message '{delivery_tag}'")
         self._channel.basic_ack(delivery_tag)
 
     def stop_consuming(self):
@@ -615,7 +646,7 @@ class AmqpClientAsync:
 
         """
         if self._channel:
-            LOGGER.info('Sending a Basic.Cancel RPC command to RabbitMQ')
+            print('Sending a Basic.Cancel RPC command to RabbitMQ')
             cb = functools.partial(
                 self.on_cancelok, userdata=self._consumer_tag)
             self._channel.basic_cancel(self._consumer_tag, cb)
@@ -631,9 +662,7 @@ class AmqpClientAsync:
 
         """
         self._consuming = False
-        LOGGER.info(
-            'RabbitMQ acknowledged the cancellation of the consumer: %s',
-            userdata)
+        print(f"RabbitMQ acknowledged the cancellation of the consumer: {userdata}")
         self.close_channel()
 
     def close_channel(self):
@@ -641,15 +670,49 @@ class AmqpClientAsync:
         Channel.Close RPC command.
 
         """
-        LOGGER.info('Closing the channel')
+        print('Closing the channel')
         self._channel.close()
 
-    def run(self):
+    def consume(
+            self, queue, callback_function,
+            auto_ack=False, consumer_tag=None, declare_queue=True, qos_count=1):
         """Run the example consumer by connecting to RabbitMQ and then
         starting the IOLoop to block and allow the SelectConnection to operate.
 
         """
+        self._queue = queue
+        self._declare_queue = declare_queue
+        self._prefetch_count = qos_count
+        self._auto_ack = auto_ack
+        self._callback_function = callback_function
+        if consumer_tag:
+            self._consumer_tag = consumer_tag
+        else:
+            self._consumer_tag = f"pika-amqp-client-{str(uuid.uuid4())}"
+        while True:
+            try:
+                self.run()
+            except KeyboardInterrupt:
+                self.stop()
+                break
+            if self.should_reconnect:
+                self.stop()
+                self._set_reconnect_delay()
+                self.logger.info(
+                    f"Reconnecting after {self._reconnect_delay} seconds")
+                time.sleep(self._reconnect_delay)
+
+    def _set_reconnect_delay(self):
+        if self.was_consuming:
+            self._reconnect_delay = 0
+        else:
+            self._reconnect_delay += 1
+        if self._reconnect_delay > 30:
+            self._reconnect_delay = 30
+
+    def run(self):
         self._connection = self.connect()
+        print(f"Connection Obj: {self._connection}")
         self._connection.ioloop.start()
 
     def stop(self):
@@ -663,12 +726,146 @@ class AmqpClientAsync:
         the IOLoop will be buffered but not processed.
 
         """
+        # if not self._closing:
+        #     self._closing = True
+        #     print('Stopping')
+        #     if self._consuming:
+        #         self.stop_consuming()
+        #     self._connection.ioloop.stop()
+        #     print('Stopped')
+        # if self.should_reconnect:
+        #     print(f"Reconnection attempt #{self._connection_attempts}...")
+        #     self._closing = False
+        #     self._connection = self.connect()
+        #     print(f"Connection Obj: {self._connection}")
+        #     self._connection.ioloop.start()
         if not self._closing:
             self._closing = True
-            LOGGER.info('Stopping')
+            print('Stopping')
             if self._consuming:
                 self.stop_consuming()
                 self._connection.ioloop.start()
             else:
                 self._connection.ioloop.stop()
-            LOGGER.info('Stopped')
+            print('Stopped')
+
+
+class AsyncConnection:
+    def __init__(self, host=None, port=None, user=None, password=None, use_ssl=False, url=None):
+        if url:
+            self.url = url
+        else:
+            self.url = AmqpUtils.generate_url(
+                host, port, user, password, use_ssl)
+        # Default the connection info to None to signal a connection has not been made yet
+        self._clear_connection()
+        self.consumer_tag = None
+        self.closing = False
+        self.logger = logging.getLogger(__name__)
+        # The root logger handler that we have set up in settings is only set for log level of
+        # "INFO" so if we want to override that, we need to add a new handler to this logger
+        # so that we can give it a different log level
+        self.logger.addHandler(logging.StreamHandler())
+        self.logger.setLevel(logging.DEBUG)
+
+    @property
+    def _is_connection_alive(self):
+        return self.connection and self.connection.is_open
+
+    def _clear_connection(self):
+        self.connection = None
+        self.channel = None
+
+    def close(self):
+        # # Stop consuming if we've started consuming already
+        # if self.consumer_tag:
+        #     self.stop_consuming()
+        # Close the connection
+        print("**** Closing connction...")
+        self.closing = True
+        if self._is_connection_alive:
+            self.connection.close()
+        print("**** Connection closed!!!")
+
+    def connect(self, retry_if_failed=True):
+        self.retry_connection_if_failed = retry_if_failed
+        self.connection = self._get_new_connection()
+        self.connection.ioloop.start()
+
+    def _get_new_connection(self):
+        if self.url.startswith("amqps://"):
+            # Looks like we're making a secure connection
+            # Create the SSL context for our secure connection. This context forces a more secure
+            # TLSv1.2 connection and uses FIPS compliant cipher suites. To understand what suites
+            # we're using here, read docs on OpenSSL cipher list format:
+            # https://www.openssl.org/docs/man1.1.1/man1/ciphers.html
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+            ssl_context.set_ciphers('ECDHE+AESGCM:!ECDSA')
+            # Create the URL parameters for our connection
+            url_parameters = pika.URLParameters(self.url)
+            url_parameters.ssl_options = pika.SSLOptions(context=ssl_context)
+        elif self.url.startswith("amqp://"):
+            # Looks like we're making a clear-text connection
+            # Create the connection and store them in self
+            url_parameters = pika.URLParameters(self.url)
+        else:
+            raise Exception("AMQP URL must start with 'amqp://' or 'amqps://'")
+
+        print("**** Starting connection...")
+        # Create the connection and store them in self
+        return pika.SelectConnection(
+            parameters=url_parameters,
+            on_open_callback=self.on_connection_open,
+            on_open_error_callback=self.on_connection_open_error,
+            on_close_callback=self.on_connection_closed)
+
+    def on_connection_open(self, _unused_connection):
+        print("**** Connection Opened!!")
+        print("**** Opening channel...")
+        self.connection.channel(on_open_callback=self.on_channel_open)
+
+    def on_channel_open(self, channel):
+        print("**** Channel opened!")
+        self.channel = channel
+        if self.action_callback:
+            self.action_callback()
+
+    def on_connection_open_error(self, _unused_connection, err):
+        print("**** Connection failed to open.. :(")
+        if self.retry_connection_if_failed:
+            self.connection.ioloop.stop()
+            print("<<< Retry connection here >>>")
+            # self.connection = self._get_new_connection()
+            self.connection.ioloop.start()
+
+    def on_connection_closed(self, _unused_connection, reason):
+        print("**** Connection Closed!!")
+        self.connection.ioloop.stop()
+        self._clear_connection()
+
+    def send_message(self, routing_key, message, exchange=None):
+        # Set the exchange to the default (empty string) if none was supplied
+        if not exchange:
+            exchange = ''
+        self.action_callback = functools.partial(
+            self._send_message_action,
+            routing_key, message, exchange
+        )
+        # Keep track whether or not we need to auto-close the connection after we're done
+        self.auto_close_connection = False
+        if not self.connection:
+            self.auto_close_connection = True
+            self.connect()
+
+    def _send_message_action(self, routing_key, message, exchange=None):
+        print("**** Sending message...")
+        # Publish a message to the correct location
+        self.channel.basic_publish(
+            exchange=exchange,
+            routing_key=routing_key,
+            body=message
+        )
+        print("**** Message sent successfully!!")
+        # Close the connection if we opened it at the beginning of this function
+        if self.auto_close_connection:
+            self.close()

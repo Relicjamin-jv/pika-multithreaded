@@ -432,7 +432,7 @@ class ReconnectingExampleConsumer(object):
 
 def main():
     logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
-    amqp_url = 'amqp://guest:guest@localhost:5672/%2F'
+    amqp_url = 'amqps://ryan-cli-test:QPwkB4Y5o4LB3jvW0TGE@b-b637fc85-8ade-43f7-b626-bbf2b40d8d98.mq.us-gov-west-1.amazonaws.com:5671/%2F'
     consumer = ReconnectingExampleConsumer(amqp_url)
     consumer.run()
 
